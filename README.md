@@ -21,16 +21,6 @@
 - `POST_NOTIFICATIONS`：展示可折叠的前台服务状态通知（Android 13+ 可选）。
 - `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`：引导用户在系统设置中关闭电池优化以防杀后台。
 
-## 本地构建与测试
-
-```bash
-# 运行纯 JVM 协议与客户端单元测试
-./gradlew :app:testDebugUnitTest
-
-# 编译 Debug APK（可直接 adb install）与混淆压缩 Release APK
-./gradlew :app:assembleDebug :app:assembleRelease
-```
-
 ## 使用方式
 
 1. 打开 SrunX，填写校园网认证网关地址（如 `http://10.0.0.1`）、学号、密码；`ac_id` 与运营商域后缀按需选填后点击「保存配置」。
