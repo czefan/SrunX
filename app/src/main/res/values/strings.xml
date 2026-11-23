@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">SrunX</string>
+    <string name="tile_keep_alive_label">SrunX 保活</string>
+    <string name="tile_login_label">SrunX 登录</string>
+</resources>

@@ -1,0 +1,3 @@
+<resources>
+    <style name="Theme.SrunX" parent="android:Theme.Material.NoActionBar" />
+</resources>
