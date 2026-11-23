@@ -25,11 +25,14 @@ import io.github.czefan.srunx.data.SrunRuntimeState
 import io.github.czefan.srunx.protocol.AuthLogEntry
 import io.github.czefan.srunx.protocol.SrunConfig
 import io.github.czefan.srunx.ui.MainActivity
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -133,7 +136,7 @@ class SrunMonitorService : Service() {
                     lastTileServiceRunning = snapshot.runtime.serviceRunning
                     requestTileSync(SrunKeepAliveTileService::class.java)
                 }
-                val isOnline = snapshot.runtime.lastStatus?.isOnline == true
+                val isOnline = snapshot.runtime.wifiConnected && snapshot.runtime.lastStatus?.isOnline == true
                 if (lastTileOnline != isOnline) {
                     lastTileOnline = isOnline
                     requestTileSync(SrunTileService::class.java)
@@ -172,15 +175,34 @@ class SrunMonitorService : Service() {
                 lastConfigWriteJob = serviceScope.launch(Dispatchers.IO) {
                     prev?.join()
                     val cfg = IpcCodec.decodeConfig(cfgJson)
-                    app.repository.saveConfig(cfg)
-                    broadcastEvent("配置已加密保存")
+                    if (saveConfig(app, cfg)) {
+                        broadcastEvent("配置已加密保存")
+                        app.coordinator.onConfigSaved()
+                    }
                 }
             }
 
             BgIpcProtocol.MSG_LOGIN_NOW -> {
+                val draft = msg.data.getString(BgIpcProtocol.KEY_CONFIG_JSON)?.let(IpcCodec::decodeConfig)
                 val pendingWrite = lastConfigWriteJob
+                val saveDeferred = if (draft != null) CompletableDeferred<Boolean>() else null
+                if (draft != null && saveDeferred != null) {
+                    lastConfigWriteJob = serviceScope.launch(Dispatchers.IO) {
+                        try {
+                            pendingWrite?.join()
+                            saveDeferred.complete(saveConfig(app, draft))
+                        } catch (t: Throwable) {
+                            saveDeferred.completeExceptionally(t)
+                            throw t
+                        }
+                    }
+                }
                 serviceScope.launch(Dispatchers.IO) {
-                    pendingWrite?.join()
+                    if (saveDeferred != null) {
+                        if (!saveDeferred.await()) return@launch
+                    } else {
+                        pendingWrite?.join()
+                    }
                     val res = app.coordinator.manualLogin(trigger = "手动")
                     broadcastEvent(if (res.success) "登录成功" else res.message)
                 }
@@ -236,6 +258,12 @@ class SrunMonitorService : Service() {
             }
         }
     }
+
+    private suspend fun saveConfig(app: SrunXApp, config: SrunConfig): Boolean =
+        runCatching { app.repository.saveConfig(config) }.onFailure {
+            currentCoroutineContext().ensureActive()
+            broadcastEvent("保存配置失败: ${it.message ?: it.javaClass.simpleName}")
+        }.isSuccess
 
     private fun stopForegroundMonitoring(app: SrunXApp) {
         app.coordinator.setServiceRunning(false)

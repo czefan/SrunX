@@ -51,6 +51,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -74,7 +75,9 @@ import io.github.czefan.srunx.BuildConfig
 import io.github.czefan.srunx.R
 import io.github.czefan.srunx.protocol.AuthLogEntry
 import io.github.czefan.srunx.protocol.OnlineDevice
+import io.github.czefan.srunx.protocol.SrunConfig
 import io.github.czefan.srunx.protocol.formatTrafficBytes
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -87,6 +90,7 @@ fun SrunXScreen(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
+    val uiScope = rememberCoroutineScope()
     val context = LocalContext.current
 
     var ignoringBatteryOpt by remember { mutableStateOf(isIgnoringBattery(context)) }
@@ -120,7 +124,7 @@ fun SrunXScreen(
     }
 
     val hasUnsavedChanges = draftInitialized && (
-        hostDraft.trim().trimEnd('/') != state.config.host.trim().trimEnd('/') ||
+        SrunConfig(host = hostDraft).normalizedHost() != state.config.normalizedHost() ||
             acIdDraft.trim() != state.config.acId ||
             usernameDraft.trim() != state.config.username ||
             passwordDraft != state.config.password ||
@@ -179,10 +183,20 @@ fun SrunXScreen(
                     state = state,
                     hasUnsavedChanges = hasUnsavedChanges,
                     onLogin = {
-                        if (hasUnsavedChanges && usernameDraft.isNotBlank() && hostDraft.isNotBlank()) {
-                            viewModel.saveConfig(hostDraft, acIdDraft, usernameDraft, passwordDraft, domainDraft)
+                        if (draftInitialized) {
+                            val draft = SrunConfig(
+                                host = hostDraft,
+                                acId = acIdDraft,
+                                username = usernameDraft,
+                                password = passwordDraft,
+                                domainSuffix = domainDraft,
+                            )
+                            if (!draft.isReadyForLogin()) {
+                                uiScope.launch { snackbarHostState.showSnackbar("请先填写完整的网关地址、学号与密码") }
+                            } else {
+                                viewModel.loginNow(draft.takeIf { hasUnsavedChanges })
+                            }
                         }
-                        viewModel.loginNow()
                     },
                     onRefresh = viewModel::refreshStatus,
                     onLogout = viewModel::logoutNow,
@@ -235,7 +249,10 @@ fun SrunXScreen(
                 )
             }
 
-            val devices = state.runtime.lastStatus?.onlineDevices.orEmpty()
+            val devices = state.runtime.lastStatus
+                ?.takeIf { state.runtime.wifiConnected && it.isOnline }
+                ?.onlineDevices
+                .orEmpty()
             if (devices.isNotEmpty()) {
                 item {
                     OnlineDevicesCard(devices = devices)
@@ -370,7 +387,7 @@ private fun StatusCard(
 ) {
     val runtime = state.runtime
     val status = runtime.lastStatus
-    val isOnline = status?.isOnline == true
+    val isOnline = runtime.wifiConnected && status?.isOnline == true
 
     ElevatedCard(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -435,7 +452,7 @@ private fun StatusCard(
             ) {
                 Button(
                     onClick = onLogin,
-                    enabled = !runtime.isBusy,
+                    enabled = state.configLoaded && !runtime.isBusy,
                     modifier = Modifier.weight(1f),
                 ) {
                     Text("登录")

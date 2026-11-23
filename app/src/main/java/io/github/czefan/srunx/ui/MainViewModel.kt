@@ -49,7 +49,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
-    fun loginNow() = bgClient.loginNow()
+    fun loginNow(draft: SrunConfig?) = bgClient.loginNow(draft)
 
     fun logoutNow() = bgClient.logoutNow()
 

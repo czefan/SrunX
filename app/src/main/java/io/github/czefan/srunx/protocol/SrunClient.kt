@@ -32,18 +32,26 @@ class SrunClient(
         val host = normalizeHostOrThrow(rawHost)
         val ts = System.currentTimeMillis()
         val cb = "jQuery_$ts"
-        val resp = httpGet(
+        val resp = httpGetChecked(
             "$host/cgi-bin/rad_user_info",
             mapOf("callback" to cb, "_" to ts.toString()),
+            "查询网关状态失败",
         )
-        val json = parseJsonp(resp.body)
-        val hasSrunHeader = !resp.headerIgnoreCase("Srun-Server").isNullOrBlank()
-        val hasSrunBody = json.has("srun_ver") || json.has("error") || json.has("online_ip") || json.has("client_ip")
-        val isSrun = hasSrunHeader || hasSrunBody
 
+        val json = parseJsonp(resp.body)
         val error = json.optString("error", "")
-        val errorMsg = json.optString("error_msg", "")
-        val isOnline = error == "ok"
+        val clientIp = json.optString("client_ip", "")
+        val onlineIp = json.optString("online_ip", "")
+        val username = json.optString("user_name", "")
+        val hasSrunHeader = !resp.headerIgnoreCase("Srun-Server").isNullOrBlank() ||
+            !resp.headerIgnoreCase("Srunflag").isNullOrBlank()
+        val hasVersion = !(json.opt("srun_ver") as? String).isNullOrBlank()
+        val hasOfflineStatus = error == "not_online_error" &&
+            (clientIp.isNotBlank() || onlineIp.isNotBlank())
+        val hasOnlineStatus = error == "ok" && username.isNotBlank() && onlineIp.isNotBlank() &&
+            (json.has("products_name") || json.has("online_device_total"))
+        val isSrun = hasSrunHeader || hasVersion || hasOfflineStatus || hasOnlineStatus
+        val isOnline = isSrun && error == "ok"
 
         val devices = if (isOnline) {
             parseOnlineDevices(json.opt("online_device_detail"))
@@ -53,10 +61,10 @@ class SrunClient(
 
         return SrunStatus(
             isOnline = isOnline,
-            username = json.optString("user_name", ""),
+            username = username,
             productName = json.optString("products_name", ""),
-            onlineIp = json.optString("online_ip", ""),
-            clientIp = json.optString("client_ip", ""),
+            onlineIp = onlineIp,
+            clientIp = clientIp,
             userMac = json.optString("user_mac", ""),
             sessionBytes = json.optLong("all_bytes", 0L),
             totalBytes = json.optLong("sum_bytes", 0L),
@@ -64,7 +72,7 @@ class SrunClient(
                 ?: json.optInt("online_device_total", devices.size),
             onlineDevices = devices,
             error = error,
-            errorMsg = errorMsg,
+            errorMsg = json.optString("error_msg", ""),
             isSrunServer = isSrun,
         )
     }
@@ -112,7 +120,7 @@ class SrunClient(
         val cb = "jQuery_$ts"
 
         var chalJson = parseJsonp(
-            httpGet(
+            httpGetChecked(
                 "$host/cgi-bin/get_challenge",
                 mapOf(
                     "callback" to cb,
@@ -120,6 +128,7 @@ class SrunClient(
                     "ip" to "",
                     "_" to ts.toString(),
                 ),
+                "获取 challenge 失败",
             ).body,
         )
         var challenge = chalJson.optString("challenge", "")
@@ -134,7 +143,7 @@ class SrunClient(
             val ts2 = System.currentTimeMillis()
             val cb2 = "jQuery_$ts2"
             chalJson = parseJsonp(
-                httpGet(
+                httpGetChecked(
                     "$host/cgi-bin/get_challenge",
                     mapOf(
                         "callback" to cb2,
@@ -142,6 +151,7 @@ class SrunClient(
                         "ip" to ip,
                         "_" to ts2.toString(),
                     ),
+                    "获取 challenge 失败",
                 ).body,
             )
             challenge = chalJson.optString("challenge", "")
@@ -169,7 +179,7 @@ class SrunClient(
         )
 
         val portalJson = parseJsonp(
-            httpGet(
+            httpGetChecked(
                 "$host/cgi-bin/srun_portal",
                 mapOf(
                     "callback" to cb,
@@ -187,6 +197,7 @@ class SrunClient(
                     "type" to SrunCrypto.TYPE_CONST,
                     "_" to (ts + 1).toString(),
                 ),
+                "认证请求失败",
             ).body,
         )
 
@@ -198,7 +209,7 @@ class SrunClient(
             .ifBlank { if (ok) "登录成功" else "登录失败" }
 
         val updatedStatus = if (ok) {
-            runCatching { getStatus(host) }.getOrNull()
+            runCatching { getStatus(host) }.getOrNull()?.takeIf { it.isSrunServer }
         } else {
             null
         }
@@ -212,26 +223,26 @@ class SrunClient(
             return SrunActionResult(false, "请先填写学号")
         }
         val acId = config.acId.trim().ifEmpty { detectAcId(host) }
-        val currentStatus = runCatching { getStatus(host) }.getOrNull()
+        val currentStatus = runCatching { getStatus(host) }.getOrNull()?.takeIf { it.isSrunServer }
         val ip = currentStatus?.onlineIp?.ifBlank { currentStatus.clientIp }
             ?.ifBlank { null }
             ?: detectIp(host, acId)
 
         val ts = System.currentTimeMillis()
         val cb = "jQuery_$ts"
-        val json = parseJsonp(
-            httpGet(
-                "$host/cgi-bin/srun_portal",
-                mapOf(
-                    "callback" to cb,
-                    "action" to "logout",
-                    "username" to username,
-                    "ip" to ip,
-                    "ac_id" to acId,
-                    "_" to ts.toString(),
-                ),
-            ).body,
+        val response = httpGetChecked(
+            "$host/cgi-bin/srun_portal",
+            mapOf(
+                "callback" to cb,
+                "action" to "logout",
+                "username" to username,
+                "ip" to ip,
+                "ac_id" to acId,
+                "_" to ts.toString(),
+            ),
+            "注销请求失败",
         )
+        val json = parseJsonp(response.body)
 
         val ok = json.optString("error") == "ok" || json.optString("suc_msg") == "logout_ok"
         val msg = json.optString("suc_msg")
@@ -239,16 +250,30 @@ class SrunClient(
             .ifBlank { json.optString("error") }
             .ifBlank { if (ok) "注销成功" else "注销失败" }
 
-        val updatedStatus = runCatching { getStatus(host) }.getOrNull()
+        val updatedStatus = runCatching { getStatus(host) }.getOrNull()?.takeIf { it.isSrunServer }
         return SrunActionResult(ok, msg, updatedStatus)
     }
 
-    private fun httpGet(url: String, params: Map<String, String>): HttpResponse {
+    private fun httpGetChecked(
+        url: String,
+        params: Map<String, String>,
+        errorPrefix: String,
+    ): HttpResponse {
+        val resp = httpGet(url, params, followRedirects = false)
+        if (resp.code !in 200..299) throw IOException("$errorPrefix（HTTP ${resp.code}）")
+        return resp
+    }
+
+    private fun httpGet(
+        url: String,
+        params: Map<String, String>,
+        followRedirects: Boolean = true,
+    ): HttpResponse {
         val query = params.entries.joinToString("&") { (k, v) ->
             "${URLEncoder.encode(k, "UTF-8")}=${URLEncoder.encode(v, "UTF-8")}"
         }
         val fullUrl = if (query.isEmpty()) url else "$url?$query"
-        return httpGetRaw(fullUrl, followRedirects = true)
+        return httpGetRaw(fullUrl, followRedirects = followRedirects)
     }
 
     private fun httpGetRaw(fullUrl: String, followRedirects: Boolean): HttpResponse {

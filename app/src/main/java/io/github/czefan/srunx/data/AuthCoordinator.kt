@@ -11,8 +11,13 @@ import io.github.czefan.srunx.protocol.SrunClient
 import io.github.czefan.srunx.protocol.SrunConfig
 import io.github.czefan.srunx.protocol.SrunStatus
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -22,7 +27,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.net.HttpURLConnection
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 data class SrunRuntimeState(
@@ -41,54 +45,75 @@ class AuthCoordinator(
     private val context: Context,
     private val repository: SettingsRepository,
 ) {
-    private data class AttemptGuard(
-        val autoAttempts: Int = 0,
-        val lastAttemptMs: Long = 0L,
-        val lastProbeMs: Long = 0L,
-    )
-
     private val cm = context.getSystemService(ConnectivityManager::class.java)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val authMutex = Mutex()
     private val callbackRegistered = AtomicBoolean(false)
 
-    private val wifiNetworks = ConcurrentHashMap<Long, Network>()
-    private val attemptGuards = ConcurrentHashMap<Long, AttemptGuard>()
+    private val networkLock = Any()
+    // null 表示已收到 onAvailable，等待首次能力回调。
+    private val wifiNetworks = linkedMapOf<Network, Boolean?>()
+    private val autoJobs = mutableMapOf<Network, Job>()
+    private var statusNetwork: Network? = null
 
     private val _runtimeState = MutableStateFlow(SrunRuntimeState())
     val runtimeState: StateFlow<SrunRuntimeState> = _runtimeState.asStateFlow()
 
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
-            wifiNetworks[network.networkHandle] = network
-            updateWifiConnectedState()
+            synchronized(networkLock) {
+                wifiNetworks[network] = null
+                _runtimeState.update { it.copy(wifiConnected = true) }
+            }
         }
 
         override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
             if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
                 caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
             ) {
+                synchronized(networkLock) {
+                    if (network in wifiNetworks) {
+                        removeWifiNetworkLocked(network)
+                    }
+                }
                 return
             }
-            wifiNetworks[network.networkHandle] = network
-            updateWifiConnectedState()
-
-            if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) {
-                attemptGuards.remove(network.networkHandle)
-                return
-            }
-
-            if (_runtimeState.value.serviceRunning) {
-                scope.launch {
-                    autoLoginIfNeeded(network)
+            synchronized(networkLock) {
+                if (network !in wifiNetworks) return
+                val validated = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+                wifiNetworks[network] = validated
+                if (validated) {
+                    autoJobs.remove(network)?.cancel()
+                } else {
+                    scheduleAutoLogin(network)
                 }
             }
         }
 
         override fun onLost(network: Network) {
-            wifiNetworks.remove(network.networkHandle)
-            attemptGuards.remove(network.networkHandle)
-            updateWifiConnectedState()
+            synchronized(networkLock) {
+                removeWifiNetworkLocked(network)
+            }
+        }
+    }
+
+    private fun removeWifiNetworkLocked(network: Network) {
+        wifiNetworks.remove(network)
+        autoJobs.remove(network)?.cancel()
+        val connected = wifiNetworks.isNotEmpty()
+        val lostStatus = statusNetwork == network
+        if (lostStatus) statusNetwork = null
+        _runtimeState.update {
+            if (lostStatus) {
+                it.copy(
+                    wifiConnected = connected,
+                    lastStatus = null,
+                    lastMessage = if (connected) "等待确认认证状态" else "当前未连接 Wi-Fi",
+                    lastUpdatedMs = System.currentTimeMillis(),
+                )
+            } else {
+                it.copy(wifiConnected = connected)
+            }
         }
     }
 
@@ -96,6 +121,7 @@ class AuthCoordinator(
         if (!callbackRegistered.compareAndSet(false, true)) return
         val request = NetworkRequest.Builder()
             .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
             .build()
         runCatching {
             cm.registerNetworkCallback(request, networkCallback)
@@ -105,23 +131,40 @@ class AuthCoordinator(
     }
 
     fun setServiceRunning(running: Boolean) {
-        _runtimeState.update { it.copy(serviceRunning = running) }
-        if (running) {
-            ensureNetworkCallbackRegistered()
-            scope.launch {
-                probeCurrentWifiIfNeeded()
+        synchronized(networkLock) {
+            _runtimeState.update { it.copy(serviceRunning = running) }
+            if (running) {
+                wifiNetworks.keys.forEach { scheduleAutoLogin(it) }
+            } else {
+                cancelAutoJobs()
             }
+        }
+        if (running) ensureNetworkCallbackRegistered()
+    }
+
+    private fun scheduleAutoLogin(network: Network) {
+        if (!_runtimeState.value.serviceRunning || wifiNetworks[network] != false || network in autoJobs) return
+
+        // 保留完成的任务，避免同一段未验证连接反复触发认证。
+        val job = scope.launch(start = CoroutineStart.LAZY) {
+            val retryAfterMs = autoLoginAttempt(network) ?: return@launch
+            delay(retryAfterMs)
+            autoLoginAttempt(network)
+        }
+        autoJobs[network] = job
+        job.start()
+    }
+
+    fun onConfigSaved() {
+        synchronized(networkLock) {
+            cancelAutoJobs()
+            wifiNetworks.keys.forEach { scheduleAutoLogin(it) }
         }
     }
 
-    fun probeCurrentWifiIfNeeded() {
-        val network = pickActiveWifiNetwork() ?: return
-        val caps = cm.getNetworkCapabilities(network) ?: return
-        if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) {
-            scope.launch {
-                autoLoginIfNeeded(network)
-            }
-        }
+    private fun cancelAutoJobs() {
+        autoJobs.values.forEach { it.cancel() }
+        autoJobs.clear()
     }
 
     suspend fun manualLogin(trigger: String = "手动"): SrunActionResult = authMutex.withLock {
@@ -148,17 +191,16 @@ class AuthCoordinator(
 
             if (result.success) {
                 runCatching { cm.reportNetworkConnectivity(network, true) }
-                attemptGuards.remove(network.networkHandle)
+                synchronized(networkLock) { autoJobs[network]?.cancel() }
             }
 
             val summary = if (result.success) "认证成功: ${result.message}" else result.message
-            _runtimeState.update { state ->
-                state.copy(
-                    isBusy = false,
-                    lastStatus = result.status ?: state.lastStatus,
-                    lastMessage = summary,
-                    lastUpdatedMs = System.currentTimeMillis(),
-                )
+            publishNetworkResult(network, summary) { previous ->
+                result.status ?: if (result.success && previous?.isOnline != true) {
+                    SrunStatus(isOnline = true, isSrunServer = true)
+                } else {
+                    previous
+                }
             }
             repository.appendLog(AuthLogEntry(System.currentTimeMillis(), trigger, result.success, summary))
             return result
@@ -166,6 +208,7 @@ class AuthCoordinator(
             setBusy(false)
         }
     }
+
 
     suspend fun manualLogout(trigger: String = "手动"): SrunActionResult = authMutex.withLock {
         val config = repository.configFlow.first()
@@ -188,17 +231,16 @@ class AuthCoordinator(
             val result = runCatching { client.logout(config) }
                 .getOrElse { SrunActionResult(false, readableError(it)) }
 
-            val summary = if (result.success) "已注销下线" else "注销失败: ${result.message}"
-            _runtimeState.update { state ->
-                state.copy(
-                    isBusy = false,
-                    lastStatus = result.status ?: state.lastStatus?.copy(isOnline = false),
-                    lastMessage = summary,
-                    lastUpdatedMs = System.currentTimeMillis(),
-                )
+            val summary = when {
+                result.success -> "已注销下线"
+                result.status != null -> "注销失败: ${result.message}"
+                else -> "注销结果未确认: ${result.message}"
+            }
+            publishNetworkResult(network, summary) { previous ->
+                result.status ?: if (result.success) SrunStatus(isOnline = false) else previous
             }
             repository.appendLog(AuthLogEntry(System.currentTimeMillis(), trigger, result.success, summary))
-            return result
+            return if (result.success) result else result.copy(message = summary)
         } finally {
             setBusy(false)
         }
@@ -223,23 +265,20 @@ class AuthCoordinator(
         setBusy(true)
         try {
             val client = createWifiClient(network)
-            val statusResult = runCatching { client.getStatus(host) }
+            val statusResult = runCatching {
+                client.getStatus(host).also {
+                    check(it.isSrunServer) { "未识别到深澜认证网关" }
+                }
+            }
             statusResult.onSuccess { status ->
                 val summary = if (status.isOnline) {
                     "已在线 · ${status.onlineIp.ifBlank { status.clientIp }}"
                 } else {
                     "未在线${status.errorMsg.takeIf { it.isNotBlank() }?.let { " ($it)" }.orEmpty()}"
                 }
-                _runtimeState.update {
-                    it.copy(
-                        isBusy = false,
-                        lastStatus = status,
-                        lastMessage = summary,
-                        lastUpdatedMs = System.currentTimeMillis(),
-                    )
-                }
+                publishNetworkResult(network, summary) { status }
             }.onFailure { err ->
-                updateMessage("刷新失败: ${readableError(err)}")
+                publishNetworkResult(network, "刷新失败: ${readableError(err)}") { it }
             }
             return statusResult
         } finally {
@@ -247,78 +286,39 @@ class AuthCoordinator(
         }
     }
 
-    private suspend fun autoLoginIfNeeded(network: Network) {
+    private suspend fun autoLoginAttempt(network: Network): Long? = authMutex.withLock {
         val config = repository.configFlow.first()
-        if (!config.autoMonitorEnabled || !config.isReadyForLogin()) return
+        if (!config.autoMonitorEnabled || !config.isReadyForLogin()) return null
 
-        val handle = network.networkHandle
-        val now = System.currentTimeMillis()
-        val earlyGuard = attemptGuards[handle]
-        if (earlyGuard != null) {
-            if (earlyGuard.autoAttempts >= MAX_AUTO_ATTEMPTS) return
-            if (now - earlyGuard.lastAttemptMs < RETRY_COOLDOWN_MS) return
-            if (now - earlyGuard.lastProbeMs < PROBE_COOLDOWN_MS) return
+        currentCoroutineContext().ensureActive()
+        val probeClient = createWifiClient(network, connectTimeoutMs = 2000, readTimeoutMs = 2500)
+        val status = runCatching { probeClient.getStatus(config.normalizedHost()) }.getOrNull()
+        if (status == null || !status.isSrunServer) return PROBE_RETRY_DELAY_MS
+
+        if (status.isOnline) {
+            publishNetworkResult(network, "已在线 · ${status.onlineIp.ifBlank { status.clientIp }}") { status }
+            runCatching { cm.reportNetworkConnectivity(network, true) }
+            return null
         }
 
-        authMutex.withLock {
-            val currentTime = System.currentTimeMillis()
-            val guard = attemptGuards[handle] ?: AttemptGuard()
-            if (guard.autoAttempts >= MAX_AUTO_ATTEMPTS) return
-            if (currentTime - guard.lastAttemptMs < RETRY_COOLDOWN_MS) return
-            if (currentTime - guard.lastProbeMs < PROBE_COOLDOWN_MS) return
+        currentCoroutineContext().ensureActive()
+        setBusy(true)
+        try {
+            val authClient = createWifiClient(network)
+            val result = runCatching { authClient.login(config) }
+                .getOrElse { SrunActionResult(false, readableError(it)) }
 
-            val host = config.normalizedHost()
-            val probeClient = createWifiClient(network, connectTimeoutMs = 2000, readTimeoutMs = 2500)
-            val status = runCatching { probeClient.getStatus(host) }.getOrNull()
-
-            if (status == null || !status.isSrunServer) {
-                attemptGuards[handle] = guard.copy(lastProbeMs = currentTime)
-                return
+            val summary = if (result.success) "自动认证成功: ${result.message}" else "自动认证失败: ${result.message}"
+            publishNetworkResult(network, summary) {
+                result.status ?: status.copy(isOnline = result.success)
             }
-
-            if (status.isOnline) {
-                attemptGuards.remove(handle)
+            if (result.success) {
                 runCatching { cm.reportNetworkConnectivity(network, true) }
-                _runtimeState.update {
-                    it.copy(
-                        lastStatus = status,
-                        lastMessage = "已在线 · ${status.onlineIp.ifBlank { status.clientIp }}",
-                        lastUpdatedMs = currentTime,
-                    )
-                }
-                return
             }
-
-            attemptGuards[handle] = guard.copy(
-                autoAttempts = guard.autoAttempts + 1,
-                lastAttemptMs = currentTime,
-                lastProbeMs = currentTime,
-            )
-
-            setBusy(true)
-            try {
-                val authClient = createWifiClient(network)
-                val result = runCatching { authClient.login(config) }
-                    .getOrElse { SrunActionResult(false, readableError(it)) }
-
-                if (result.success) {
-                    runCatching { cm.reportNetworkConnectivity(network, true) }
-                    attemptGuards.remove(handle)
-                }
-
-                val summary = if (result.success) "自动认证成功: ${result.message}" else "自动认证失败: ${result.message}"
-                _runtimeState.update { state ->
-                    state.copy(
-                        isBusy = false,
-                        lastStatus = result.status ?: status,
-                        lastMessage = summary,
-                        lastUpdatedMs = System.currentTimeMillis(),
-                    )
-                }
-                repository.appendLog(AuthLogEntry(System.currentTimeMillis(), "自动保活", result.success, summary))
-            } finally {
-                setBusy(false)
-            }
+            repository.appendLog(AuthLogEntry(System.currentTimeMillis(), "自动保活", result.success, summary))
+            if (result.success) null else AUTH_RETRY_DELAY_MS
+        } finally {
+            setBusy(false)
         }
     }
 
@@ -332,22 +332,26 @@ class AuthCoordinator(
         readTimeoutMs = readTimeoutMs,
     )
 
-    private fun pickActiveWifiNetwork(): Network? {
-        for (net in wifiNetworks.values) {
-            val caps = cm.getNetworkCapabilities(net) ?: continue
-            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
-                !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
-            ) {
-                return net
-            }
-        }
-        return null
+    private fun pickActiveWifiNetwork(): Network? = synchronized(networkLock) {
+        statusNetwork ?: wifiNetworks.keys.firstOrNull()
     }
 
-    private fun updateWifiConnectedState() {
-        val connected = pickActiveWifiNetwork() != null
-        _runtimeState.update { state ->
-            if (state.wifiConnected == connected) state else state.copy(wifiConnected = connected)
+    private fun publishNetworkResult(
+        network: Network,
+        message: String,
+        status: (SrunStatus?) -> SrunStatus?,
+    ) {
+        synchronized(networkLock) {
+            if (network !in wifiNetworks) return
+            val previous = _runtimeState.value.lastStatus.takeIf { statusNetwork == network }
+            statusNetwork = network
+            _runtimeState.update {
+                it.copy(
+                    lastStatus = status(previous),
+                    lastMessage = message,
+                    lastUpdatedMs = System.currentTimeMillis(),
+                )
+            }
         }
     }
 
@@ -365,8 +369,7 @@ class AuthCoordinator(
     }
 
     companion object {
-        private const val MAX_AUTO_ATTEMPTS = 2
-        private const val RETRY_COOLDOWN_MS = 45_000L
-        private const val PROBE_COOLDOWN_MS = 12_000L
+        private const val AUTH_RETRY_DELAY_MS = 45_000L
+        private const val PROBE_RETRY_DELAY_MS = 12_000L
     }
 }

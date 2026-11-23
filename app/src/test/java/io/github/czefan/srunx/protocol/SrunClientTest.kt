@@ -5,9 +5,11 @@ import com.sun.net.httpserver.HttpServer
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.URLDecoder
 
@@ -25,7 +27,22 @@ class SrunClientTest {
     private var lastLogoutParams: Map<String, String> = emptyMap()
 
     @Volatile
-    private var returnNonSrunOnStatus = false
+    private var statusBodyOverride: String? = null
+
+    @Volatile
+    private var statusHttpCode = 200
+
+    @Volatile
+    private var includeSrunHeader = true
+
+    @Volatile
+    private var srunHeaderName = "Srun-Server"
+
+    @Volatile
+    private var challengeHttpCode = 200
+
+    @Volatile
+    private var portalHttpCode = 200
 
     private val testChallenge = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     private val testClientIp = "192.0.2.10"
@@ -46,31 +63,47 @@ class SrunClientTest {
         }
 
         server.createContext("/cgi-bin/rad_user_info") { ex ->
-            if (returnNonSrunOnStatus) {
-                sendText(ex, 200, """{"status":"unrelated"}""")
-                return@createContext
-            }
             val cb = parseQuery(ex.requestURI.rawQuery)["callback"] ?: "cb"
-            ex.responseHeaders.add("Srun-Server", "SRunCGIAuthIntfSvr V1.18")
+            if (includeSrunHeader) {
+                val value = if (srunHeaderName.equals("Srunflag", ignoreCase = true)) {
+                    "SRun portal server golang version"
+                } else {
+                    "SRunCGIAuthIntfSvr V1.18"
+                }
+                ex.responseHeaders.add(srunHeaderName, value)
+            }
+            if (statusHttpCode == 302) {
+                ex.responseHeaders.add("Location", "$baseUrl/cgi-bin/get_challenge")
+            }
             val body = if (onlineState) {
                 """$cb({"error":"ok","user_name":"20250001@cmcc","products_name":"学生","online_ip":"$testClientIp","user_mac":"aa:bb:cc:dd:ee:ff","all_bytes":12345678,"sum_bytes":9876543210,"online_device_total":"2","online_device_detail":"{\"1\":{\"os_name\":\"AndroidOS\",\"ip\":\"$testClientIp\",\"rad_online_id\":\"1\"},\"2\":{\"os_name\":\"Windows 10\",\"ip\":\"192.0.2.11\",\"rad_online_id\":\"2\"}}"})"""
             } else {
                 """$cb({"error":"not_online_error","error_msg":"","client_ip":"$testClientIp","srun_ver":"SRunCGIAuthIntfSvr V1.18"})"""
             }
-            sendText(ex, 200, body)
+            sendText(ex, statusHttpCode, statusBodyOverride ?: body)
         }
 
         server.createContext("/cgi-bin/get_challenge") { ex ->
             val cb = parseQuery(ex.requestURI.rawQuery)["callback"] ?: "cb"
             ex.responseHeaders.add("Srun-Server", "SRunCGIAuthIntfSvr V1.18")
+            if (challengeHttpCode == 302) {
+                ex.responseHeaders.add("Location", "$baseUrl/cgi-bin/rad_user_info")
+            }
             val body = """$cb({"challenge":"$testChallenge","client_ip":"$testClientIp","online_ip":"$testClientIp","error":"ok","res":"ok"})"""
-            sendText(ex, 200, body)
+            sendText(ex, challengeHttpCode, body)
         }
 
         server.createContext("/cgi-bin/srun_portal") { ex ->
             val params = parseQuery(ex.requestURI.rawQuery)
             val cb = params["callback"] ?: "cb"
             ex.responseHeaders.add("Srun-Server", "SRunCGIAuthIntfSvr V1.18")
+            if (portalHttpCode == 302) {
+                ex.responseHeaders.add("Location", "$baseUrl/cgi-bin/rad_user_info")
+            }
+            if (portalHttpCode !in 200..299) {
+                sendText(ex, portalHttpCode, """$cb({"error":"http_error"})""")
+                return@createContext
+            }
             when (params["action"]) {
                 "login" -> {
                     lastLoginParams = params
@@ -138,11 +171,111 @@ class SrunClientTest {
     }
 
     @Test
-    fun `getStatus flags non-srun server properly`() {
-        returnNonSrunOnStatus = true
-        val status = SrunClient().getStatus(baseUrl)
-        assertFalse(status.isSrunServer)
+    fun `getStatus rejects generic JSON errors and online responses`() {
+        includeSrunHeader = false
+        val client = SrunClient()
+        listOf(
+            """{"error":"not_found"}""",
+            """{"error":"ok","client_ip":"$testClientIp","online_ip":"$testClientIp"}""",
+        ).forEach { body ->
+            statusBodyOverride = body
+            val status = client.getStatus(baseUrl)
+            assertFalse(status.isSrunServer)
+            assertFalse(status.isOnline)
+        }
+    }
+
+    @Test
+    fun `getStatus accepts known offline responses without the Srun header`() {
+        includeSrunHeader = false
+        val client = SrunClient()
+        assertTrue(client.getStatus(baseUrl).isSrunServer)
+
+        statusBodyOverride = """{"error":"not_online_error","client_ip":"$testClientIp"}"""
+        val status = client.getStatus(baseUrl)
+        assertTrue(status.isSrunServer)
         assertFalse(status.isOnline)
+    }
+
+    @Test
+    fun `getStatus accepts a headerless online response with Srun account fields`() {
+        includeSrunHeader = false
+        onlineState = true
+        val status = SrunClient().getStatus(baseUrl)
+        assertTrue(status.isSrunServer)
+        assertTrue(status.isOnline)
+    }
+
+    @Test
+    fun `getStatus rejects HTTP errors even with Srun markers`() {
+        statusHttpCode = 404
+        val error = assertThrows(IOException::class.java) { SrunClient().getStatus(baseUrl) }
+        assertTrue(error.message.orEmpty().contains("HTTP 404"))
+    }
+
+    @Test
+    fun `getStatus does not use a redirect destination to identify the gateway`() {
+        statusHttpCode = 302
+        val error = assertThrows(IOException::class.java) { SrunClient().getStatus(baseUrl) }
+        assertTrue(error.message.orEmpty().contains("HTTP 302"))
+    }
+
+    @Test
+    fun `getStatus accepts Srunflag header and online_ip offline responses`() {
+        val client = SrunClient()
+        srunHeaderName = "Srunflag"
+        statusBodyOverride = """{"error":"not_online_error"}"""
+        val headerStatus = client.getStatus(baseUrl)
+        assertTrue(headerStatus.isSrunServer)
+        assertFalse(headerStatus.isOnline)
+
+        includeSrunHeader = false
+        statusBodyOverride = """{"error":"not_online_error","online_ip":"$testClientIp"}"""
+        val onlineIpStatus = client.getStatus(baseUrl)
+        assertTrue(onlineIpStatus.isSrunServer)
+        assertFalse(onlineIpStatus.isOnline)
+    }
+
+    @Test
+    fun `login rejects HTTP errors and redirects on challenge and portal endpoints`() {
+        val client = SrunClient()
+        val cfg = SrunConfig(
+            host = baseUrl,
+            acId = "7",
+            username = "20250001",
+            password = "secret_password",
+        )
+
+        challengeHttpCode = 404
+        val chal404 = assertThrows(IOException::class.java) { client.login(cfg) }
+        assertTrue(chal404.message.orEmpty().contains("HTTP 404"))
+
+        challengeHttpCode = 302
+        val chal302 = assertThrows(IOException::class.java) { client.login(cfg) }
+        assertTrue(chal302.message.orEmpty().contains("HTTP 302"))
+
+        challengeHttpCode = 200
+        portalHttpCode = 404
+        val portal404 = assertThrows(IOException::class.java) { client.login(cfg) }
+        assertTrue(portal404.message.orEmpty().contains("HTTP 404"))
+
+        portalHttpCode = 302
+        val portal302 = assertThrows(IOException::class.java) { client.login(cfg) }
+        assertTrue(portal302.message.orEmpty().contains("HTTP 302"))
+    }
+
+    @Test
+    fun `logout rejects HTTP redirects on portal endpoint`() {
+        onlineState = true
+        portalHttpCode = 302
+        val cfg = SrunConfig(
+            host = baseUrl,
+            acId = "7",
+            username = "20250001",
+            password = "secret_password",
+        )
+        val err = assertThrows(IOException::class.java) { SrunClient().logout(cfg) }
+        assertTrue(err.message.orEmpty().contains("HTTP 302"))
     }
 
     private fun parseQuery(raw: String?): Map<String, String> {
