@@ -148,10 +148,23 @@ class AuthCoordinator(
 
     private fun scheduleAutoLogin(network: Network) {
         if (!_runtimeState.value.serviceRunning || wifiNetworks[network] != false || network in autoJobs) return
+        launchAutoJobLocked(network, initialDelayMs = 0L)
+    }
 
+    private fun scheduleAutoRetryAfterFailureLocked(network: Network) {
+        if (!_runtimeState.value.serviceRunning || wifiNetworks[network] != false) return
+        autoJobs.remove(network)?.cancel()
+        launchAutoJobLocked(network, initialDelayMs = AUTH_RETRY_DELAY_MS)
+    }
+
+    private fun launchAutoJobLocked(network: Network, initialDelayMs: Long) {
         // 保留完成的任务，避免同一段未验证连接反复触发认证。
         val job = scope.launch(start = CoroutineStart.LAZY) {
-            val retryAfterMs = autoLoginAttempt(network) ?: return@launch
+            val retryAfterMs = if (initialDelayMs > 0L) {
+                initialDelayMs
+            } else {
+                autoLoginAttempt(network) ?: return@launch
+            }
             delay(retryAfterMs)
             if (synchronized(networkLock) { wifiNetworks[network] == false }) autoLoginAttempt(network)
         }
@@ -208,6 +221,8 @@ class AuthCoordinator(
             if (result.success) {
                 runCatching { cm.reportNetworkConnectivity(network, true) }
                 synchronized(networkLock) { autoJobs[network]?.cancel() }
+            } else {
+                synchronized(networkLock) { scheduleAutoRetryAfterFailureLocked(network) }
             }
 
             val summary = if (result.success) "认证成功: ${result.message}" else result.message
