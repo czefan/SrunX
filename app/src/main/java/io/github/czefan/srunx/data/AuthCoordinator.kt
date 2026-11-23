@@ -256,6 +256,8 @@ class AuthCoordinator(
             return SrunActionResult(false, msg)
         }
 
+        // 保留任务记录，避免同一段未验证连接的重复回调再次安排登录。
+        synchronized(networkLock) { autoJobs[network]?.cancel() }
         setBusy(true)
         try {
             val client = createWifiClient(network)
