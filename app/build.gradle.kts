@@ -21,6 +21,22 @@ android {
         versionName = "0.1.0"
     }
 
+    val keystoreFile = System.getenv("SRUNX_KEYSTORE_FILE")
+        ?.takeIf { it.isNotBlank() }
+        ?.let(::file)
+        ?.takeIf { it.isFile }
+
+    signingConfigs {
+        if (keystoreFile != null) {
+            create("release") {
+                storeFile = keystoreFile
+                storePassword = System.getenv("SRUNX_KEYSTORE_PASSWORD").orEmpty()
+                keyAlias = System.getenv("SRUNX_KEY_ALIAS").orEmpty()
+                keyPassword = System.getenv("SRUNX_KEY_PASSWORD").orEmpty()
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
@@ -29,6 +45,9 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
+            if (keystoreFile != null) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
