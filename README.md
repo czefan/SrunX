@@ -6,7 +6,7 @@
 
 ## 界面预览
 
-<img width="1200" height="2000" alt="image" src="https://github.com/user-attachments/assets/4e7989c6-e7e5-4e32-b6e5-05af076904a3" />
+<img width="380" alt="image" src="https://github.com/user-attachments/assets/3fbdee72-7893-427f-8352-1d57f12a6a89" />
 
 ## 核心特性
 
