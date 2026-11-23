@@ -4,6 +4,10 @@
   <p>极简轻量的开源深澜（Srun3000）校园网 Android 自动认证与保活客户端。</p>
 </div>
 
+## 界面预览
+
+<img width="1200" height="2000" alt="image" src="https://github.com/user-attachments/assets/4e7989c6-e7e5-4e32-b6e5-05af076904a3" />
+
 ## 核心特性
 
 - **双进程轻量化架构**：界面（主进程）与后台保活（`:bg` 独立无界面进程）分离，通过原生 `Messenger` 跨进程通信；划掉界面卡片后 `:bg` 不加载 UI 渲染资源，独立极简驻留。
