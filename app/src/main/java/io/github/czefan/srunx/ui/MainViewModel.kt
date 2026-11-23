@@ -1,6 +1,7 @@
 package io.github.czefan.srunx.ui
 
 import android.app.Application
+import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.AndroidViewModel
 import io.github.czefan.srunx.data.SrunRuntimeState
 import io.github.czefan.srunx.protocol.AuthLogEntry
@@ -16,6 +17,13 @@ data class SrunUiState(
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
+    val hostDraft = mutableStateOf("")
+    val acIdDraft = mutableStateOf("")
+    val usernameDraft = mutableStateOf("")
+    val passwordDraft = mutableStateOf("")
+    val domainDraft = mutableStateOf("")
+    val draftInitialized = mutableStateOf(false)
+
     private val bgClient = BgServiceClient(application)
 
     val uiState: StateFlow<SrunUiState> = bgClient.uiState

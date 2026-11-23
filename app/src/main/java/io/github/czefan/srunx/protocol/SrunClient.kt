@@ -292,7 +292,19 @@ class SrunClient(
             connection.setRequestProperty("Connection", "close")
             val code = connection.responseCode
             val stream = if (code >= 400) null else connection.inputStream
-            val body = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+            val body = stream?.use { input ->
+                val buffer = ByteArray(8192)
+                val output = java.io.ByteArrayOutputStream()
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    if (output.size() + count > MAX_RESPONSE_BYTES) {
+                        throw IllegalStateException("网关响应超过 1 MiB")
+                    }
+                    output.write(buffer, 0, count)
+                }
+                output.toString("UTF-8")
+            }.orEmpty()
             return HttpResponse(code, body, connection.headerFields.orEmpty())
         } catch (err: IOException) {
             throw IOException("网关通信失败（${err.javaClass.simpleName}）", err)
@@ -302,6 +314,7 @@ class SrunClient(
     }
 
     companion object {
+        private const val MAX_RESPONSE_BYTES = 1024 * 1024
         private val JSONP_REGEX = Regex("""^\s*\w+\((.*)\)\s*;?\s*$""", RegexOption.DOT_MATCHES_ALL)
         private val AC_ID_QUERY_REGEX = Regex("""[?&]ac_id=(\d+)""")
         private val AC_ID_JS_REGEX = Regex("""\bacid\s*[:=]\s*["']?(\d+)["']?""", RegexOption.IGNORE_CASE)

@@ -190,7 +190,9 @@ class SrunMonitorService : Service() {
                     lastConfigWriteJob = serviceScope.launch(Dispatchers.IO) {
                         try {
                             pendingWrite?.join()
-                            saveDeferred.complete(saveConfig(app, draft))
+                            val saved = saveConfig(app, draft)
+                            if (saved) app.coordinator.onConfigSaved(scheduleLogin = false)
+                            saveDeferred.complete(saved)
                         } catch (t: Throwable) {
                             saveDeferred.completeExceptionally(t)
                             throw t

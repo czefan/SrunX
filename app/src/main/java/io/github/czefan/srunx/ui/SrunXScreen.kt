@@ -104,13 +104,12 @@ fun SrunXScreen(
         }
     }
 
-    var hostDraft by rememberSaveable { mutableStateOf("") }
-    var acIdDraft by rememberSaveable { mutableStateOf("") }
-    var usernameDraft by rememberSaveable { mutableStateOf("") }
-    var passwordDraft by remember { mutableStateOf("") }
-    var domainDraft by rememberSaveable { mutableStateOf("") }
-    var passwordInitialized by remember { mutableStateOf(false) }
-    var draftInitialized by rememberSaveable { mutableStateOf(false) }
+    var hostDraft by viewModel.hostDraft
+    var acIdDraft by viewModel.acIdDraft
+    var usernameDraft by viewModel.usernameDraft
+    var passwordDraft by viewModel.passwordDraft
+    var domainDraft by viewModel.domainDraft
+    var draftInitialized by viewModel.draftInitialized
     var showAboutDialog by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(state.configLoaded) {
@@ -119,15 +118,12 @@ fun SrunXScreen(
             acIdDraft = state.config.acId
             usernameDraft = state.config.username
             domainDraft = state.config.domainSuffix
-            draftInitialized = true
-        }
-        if (state.configLoaded && !passwordInitialized) {
             passwordDraft = state.config.password
-            passwordInitialized = true
+            draftInitialized = true
         }
     }
 
-    val draftReady = state.configLoaded && draftInitialized && passwordInitialized
+    val draftReady = state.configLoaded && draftInitialized
     val hasUnsavedChanges = draftReady && (
         SrunConfig(host = hostDraft).normalizedHost() != state.config.normalizedHost() ||
             acIdDraft.trim() != state.config.acId ||

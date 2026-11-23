@@ -53,6 +53,7 @@ class AuthCoordinator(
     private val networkLock = Any()
     // null 表示已收到 onAvailable，等待首次能力回调。
     private val wifiNetworks = linkedMapOf<Network, Boolean?>()
+    private val submittedJobs = mutableMapOf<Network, Job>()
     private val autoJobs = mutableMapOf<Network, Job>()
     private var statusNetwork: Network? = null
 
@@ -83,7 +84,10 @@ class AuthCoordinator(
                 val validated = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
                 wifiNetworks[network] = validated
                 if (validated) {
-                    autoJobs.remove(network)?.cancel()
+                    val job = autoJobs[network]
+                    if (job != null && submittedJobs[network] !== job) {
+                        autoJobs.remove(network)?.cancel()
+                    }
                 } else {
                     scheduleAutoLogin(network)
                 }
@@ -149,22 +153,34 @@ class AuthCoordinator(
         val job = scope.launch(start = CoroutineStart.LAZY) {
             val retryAfterMs = autoLoginAttempt(network) ?: return@launch
             delay(retryAfterMs)
-            autoLoginAttempt(network)
+            if (synchronized(networkLock) { wifiNetworks[network] == false }) autoLoginAttempt(network)
+        }
+        job.invokeOnCompletion {
+            synchronized(networkLock) {
+                if (submittedJobs[network] === job) submittedJobs.remove(network)
+                if (autoJobs[network] === job && wifiNetworks[network] == true) autoJobs.remove(network)
+            }
         }
         autoJobs[network] = job
         job.start()
     }
 
-    fun onConfigSaved() {
+    fun onConfigSaved(scheduleLogin: Boolean = true) {
         synchronized(networkLock) {
-            cancelAutoJobs()
-            wifiNetworks.keys.forEach { scheduleAutoLogin(it) }
+            if (scheduleLogin) {
+                cancelAutoJobs()
+                wifiNetworks.keys.forEach { scheduleAutoLogin(it) }
+            } else {
+                // 手动登录接管当前未验证连接，保留任务记录以合并重复回调。
+                autoJobs.values.toList().forEach { it.cancel() }
+            }
         }
     }
 
     private fun cancelAutoJobs() {
-        autoJobs.values.forEach { it.cancel() }
+        val jobs = autoJobs.values.toList()
         autoJobs.clear()
+        jobs.forEach { it.cancel() }
     }
 
     suspend fun manualLogin(trigger: String = "手动", draft: SrunConfig? = null): SrunActionResult = authMutex.withLock {
@@ -307,7 +323,15 @@ class AuthCoordinator(
         try {
             val authClient = createWifiClient(network)
             val task = currentCoroutineContext()
-            val result = runCatching { authClient.login(config) { task.ensureActive() } }
+            val job = checkNotNull(task[Job])
+            val result = runCatching {
+                authClient.login(config) {
+                    synchronized(networkLock) {
+                        task.ensureActive()
+                        submittedJobs[network] = job
+                    }
+                }
+            }
                 .getOrElse { SrunActionResult(false, readableError(it)) }
 
             task.ensureActive()
@@ -319,7 +343,10 @@ class AuthCoordinator(
                 runCatching { cm.reportNetworkConnectivity(network, true) }
             }
             repository.appendLog(AuthLogEntry(System.currentTimeMillis(), "自动保活", result.success, summary))
-            if (result.success) null else AUTH_RETRY_DELAY_MS
+            synchronized(networkLock) {
+                if (submittedJobs[network] === job) submittedJobs.remove(network)
+            }
+            if (result.success || synchronized(networkLock) { wifiNetworks[network] != false }) null else AUTH_RETRY_DELAY_MS
         } finally {
             setBusy(false)
         }

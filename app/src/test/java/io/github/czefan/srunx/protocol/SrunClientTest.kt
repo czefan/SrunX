@@ -309,6 +309,13 @@ class SrunClientTest {
         assertFalse(msg.contains("secret_password"))
     }
 
+    @Test
+    fun `oversized gateway response is rejected before parsing`() {
+        statusBodyOverride = " ".repeat(1024 * 1024 + 1)
+        val error = assertThrows(IllegalStateException::class.java) { SrunClient().getStatus(baseUrl) }
+        assertTrue(error.message.orEmpty().contains("1 MiB"))
+    }
+
     private fun parseQuery(raw: String?): Map<String, String> {
         if (raw.isNullOrBlank()) return emptyMap()
         return raw.split("&")
