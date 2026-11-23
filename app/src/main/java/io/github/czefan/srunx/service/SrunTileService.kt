@@ -38,15 +38,15 @@ class SrunTileService : TileService() {
         listeningJob?.cancel()
         listeningJob = tileScope.launch(Dispatchers.Main.immediate) {
             app.coordinator.runtimeState
-                .map { it.wifiConnected to it.lastStatus }
+                .map { Triple(it.wifiConnected, it.lastStatus, it.isBusy) }
                 .distinctUntilChanged()
-                .collect { (wifiConnected, _) ->
+                .collect { (wifiConnected, _, _) ->
                     if (!wifiConnected && transientNeedsWifi) {
                         resetLabelJob?.cancel()
                         resetLabelJob = null
                         transientNeedsWifi = false
                     }
-                    if (clickInFlight || resetLabelJob?.isActive == true || app.coordinator.runtimeState.value.isBusy) {
+                    if (clickInFlight || resetLabelJob?.isActive == true) {
                         return@collect
                     }
                     updateTileFromState()

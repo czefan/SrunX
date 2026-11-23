@@ -265,6 +265,16 @@ class SrunClientTest {
     }
 
     @Test
+    fun `cancelled login never submits the portal request`() {
+        val cfg = SrunConfig(host = baseUrl, acId = "7", username = "student", password = "test")
+        assertThrows(java.util.concurrent.CancellationException::class.java) {
+            SrunClient().login(cfg) { throw java.util.concurrent.CancellationException() }
+        }
+        assertTrue(lastLoginParams.isEmpty())
+        assertFalse(onlineState)
+    }
+
+    @Test
     fun `logout rejects HTTP redirects on portal endpoint`() {
         onlineState = true
         portalHttpCode = 302
@@ -276,6 +286,27 @@ class SrunClientTest {
         )
         val err = assertThrows(IOException::class.java) { SrunClient().logout(cfg) }
         assertTrue(err.message.orEmpty().contains("HTTP 302"))
+    }
+
+    @Test
+    fun `httpGetRaw scrubs IOException messages instead of leaking request URLs`() {
+        val client = SrunClient(
+            connectionFactory = { url ->
+                throw IOException("Failed to connect to $url")
+            },
+        )
+        val cfg = SrunConfig(
+            host = baseUrl,
+            acId = "7",
+            username = "20250001",
+            password = "secret_password",
+        )
+        val err = assertThrows(IOException::class.java) { client.login(cfg) }
+        val msg = err.message.orEmpty()
+        assertTrue(msg.contains("网关通信失败"))
+        assertFalse(msg.contains("username"))
+        assertFalse(msg.contains("20250001"))
+        assertFalse(msg.contains("secret_password"))
     }
 
     private fun parseQuery(raw: String?): Map<String, String> {

@@ -107,8 +107,9 @@ fun SrunXScreen(
     var hostDraft by rememberSaveable { mutableStateOf("") }
     var acIdDraft by rememberSaveable { mutableStateOf("") }
     var usernameDraft by rememberSaveable { mutableStateOf("") }
-    var passwordDraft by rememberSaveable { mutableStateOf("") }
+    var passwordDraft by remember { mutableStateOf("") }
     var domainDraft by rememberSaveable { mutableStateOf("") }
+    var passwordInitialized by remember { mutableStateOf(false) }
     var draftInitialized by rememberSaveable { mutableStateOf(false) }
     var showAboutDialog by rememberSaveable { mutableStateOf(false) }
 
@@ -117,13 +118,17 @@ fun SrunXScreen(
             hostDraft = state.config.host
             acIdDraft = state.config.acId
             usernameDraft = state.config.username
-            passwordDraft = state.config.password
             domainDraft = state.config.domainSuffix
             draftInitialized = true
         }
+        if (state.configLoaded && !passwordInitialized) {
+            passwordDraft = state.config.password
+            passwordInitialized = true
+        }
     }
 
-    val hasUnsavedChanges = draftInitialized && (
+    val draftReady = state.configLoaded && draftInitialized && passwordInitialized
+    val hasUnsavedChanges = draftReady && (
         SrunConfig(host = hostDraft).normalizedHost() != state.config.normalizedHost() ||
             acIdDraft.trim() != state.config.acId ||
             usernameDraft.trim() != state.config.username ||
@@ -181,9 +186,10 @@ fun SrunXScreen(
             item {
                 StatusCard(
                     state = state,
+                    loginReady = draftReady,
                     hasUnsavedChanges = hasUnsavedChanges,
                     onLogin = {
-                        if (draftInitialized) {
+                        if (draftReady) {
                             val draft = SrunConfig(
                                 host = hostDraft,
                                 acId = acIdDraft,
@@ -194,7 +200,7 @@ fun SrunXScreen(
                             if (!draft.isReadyForLogin()) {
                                 uiScope.launch { snackbarHostState.showSnackbar("请先填写完整的网关地址、学号与密码") }
                             } else {
-                                viewModel.loginNow(draft.takeIf { hasUnsavedChanges })
+                                viewModel.loginNow(draft, hasUnsavedChanges)
                             }
                         }
                     },
@@ -232,6 +238,7 @@ fun SrunXScreen(
 
             item {
                 ConfigCard(
+                    ready = draftReady,
                     host = hostDraft,
                     acId = acIdDraft,
                     username = usernameDraft,
@@ -380,6 +387,7 @@ private fun AboutDialog(
 @Composable
 private fun StatusCard(
     state: SrunUiState,
+    loginReady: Boolean,
     hasUnsavedChanges: Boolean,
     onLogin: () -> Unit,
     onRefresh: () -> Unit,
@@ -452,7 +460,7 @@ private fun StatusCard(
             ) {
                 Button(
                     onClick = onLogin,
-                    enabled = state.configLoaded && !runtime.isBusy,
+                    enabled = loginReady && !runtime.isBusy,
                     modifier = Modifier.weight(1f),
                 ) {
                     Text("登录")
@@ -562,6 +570,7 @@ private fun KeepAliveCard(
 
 @Composable
 private fun ConfigCard(
+    ready: Boolean,
     host: String,
     acId: String,
     username: String,
@@ -575,7 +584,7 @@ private fun ConfigCard(
     onDomainChange: (String) -> Unit,
     onSave: () -> Unit,
 ) {
-    var passwordVisible by rememberSaveable { mutableStateOf(false) }
+    var passwordVisible by remember { mutableStateOf(false) }
 
     OutlinedCard(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -603,6 +612,7 @@ private fun ConfigCard(
 
             OutlinedTextField(
                 value = host,
+                enabled = ready,
                 onValueChange = onHostChange,
                 label = { Text("认证网关地址") },
                 placeholder = { Text("例如 http://10.0.0.1") },
@@ -613,6 +623,7 @@ private fun ConfigCard(
 
             OutlinedTextField(
                 value = acId,
+                enabled = ready,
                 onValueChange = onAcIdChange,
                 label = { Text("AC ID（选填）") },
                 placeholder = { Text("留空则自动从门户页探测") },
@@ -623,6 +634,7 @@ private fun ConfigCard(
 
             OutlinedTextField(
                 value = username,
+                enabled = ready,
                 onValueChange = onUsernameChange,
                 label = { Text("学号 / 账号") },
                 placeholder = { Text("输入校园网登录账号") },
@@ -632,13 +644,17 @@ private fun ConfigCard(
 
             OutlinedTextField(
                 value = password,
+                enabled = ready,
                 onValueChange = onPasswordChange,
                 label = { Text("密码") },
                 placeholder = { Text("加密保存在本地 Keystore 中") },
                 singleLine = true,
                 visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
                 trailingIcon = {
-                    TextButton(onClick = { passwordVisible = !passwordVisible }) {
+                    TextButton(
+                        enabled = ready,
+                        onClick = { passwordVisible = !passwordVisible },
+                    ) {
                         Text(if (passwordVisible) "隐藏" else "显示")
                     }
                 },
@@ -656,6 +672,7 @@ private fun ConfigCard(
 
             OutlinedTextField(
                 value = domainSuffix,
+                enabled = ready,
                 onValueChange = onDomainChange,
                 label = { Text("运营商域后缀（选填）") },
                 placeholder = { Text("如 cmcc / unicom，无需求留空") },
@@ -664,6 +681,7 @@ private fun ConfigCard(
             )
 
             Button(
+                enabled = ready,
                 onClick = onSave,
                 modifier = Modifier.fillMaxWidth(),
             ) {

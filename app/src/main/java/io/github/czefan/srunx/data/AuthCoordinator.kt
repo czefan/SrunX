@@ -167,8 +167,8 @@ class AuthCoordinator(
         autoJobs.clear()
     }
 
-    suspend fun manualLogin(trigger: String = "手动"): SrunActionResult = authMutex.withLock {
-        val config = repository.configFlow.first()
+    suspend fun manualLogin(trigger: String = "手动", draft: SrunConfig? = null): SrunActionResult = authMutex.withLock {
+        val config = draft ?: repository.configFlow.first()
         if (!config.isReadyForLogin()) {
             val msg = "请先填写完整的网关地址、学号与密码"
             updateMessage(msg)
@@ -295,6 +295,7 @@ class AuthCoordinator(
         val status = runCatching { probeClient.getStatus(config.normalizedHost()) }.getOrNull()
         if (status == null || !status.isSrunServer) return PROBE_RETRY_DELAY_MS
 
+        currentCoroutineContext().ensureActive()
         if (status.isOnline) {
             publishNetworkResult(network, "已在线 · ${status.onlineIp.ifBlank { status.clientIp }}") { status }
             runCatching { cm.reportNetworkConnectivity(network, true) }
@@ -305,9 +306,11 @@ class AuthCoordinator(
         setBusy(true)
         try {
             val authClient = createWifiClient(network)
-            val result = runCatching { authClient.login(config) }
+            val task = currentCoroutineContext()
+            val result = runCatching { authClient.login(config) { task.ensureActive() } }
                 .getOrElse { SrunActionResult(false, readableError(it)) }
 
+            task.ensureActive()
             val summary = if (result.success) "自动认证成功: ${result.message}" else "自动认证失败: ${result.message}"
             publishNetworkResult(network, summary) {
                 result.status ?: status.copy(isOnline = result.success)

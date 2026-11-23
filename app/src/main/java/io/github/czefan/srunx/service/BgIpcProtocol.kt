@@ -1,6 +1,7 @@
 package io.github.czefan.srunx.service
 
 object BgIpcProtocol {
+    const val KEY_SAVE_DRAFT = "save_draft"
     const val MSG_REGISTER_CLIENT = 1
     const val MSG_UNREGISTER_CLIENT = 2
     const val MSG_SAVE_CONFIG = 3

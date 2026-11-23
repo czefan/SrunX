@@ -108,7 +108,7 @@ class SrunClient(
         throw IOException("未能从认证页面解析到终端 IP")
     }
 
-    fun login(config: SrunConfig): SrunActionResult {
+    fun login(config: SrunConfig, beforeSubmit: () -> Unit = {}): SrunActionResult {
         val host = normalizeHostOrThrow(config.normalizedHost())
         val username = config.effectiveUsername()
         if (username.isEmpty() || config.password.isEmpty()) {
@@ -178,6 +178,7 @@ class SrunClient(
             info = info,
         )
 
+        beforeSubmit()
         val portalJson = parseJsonp(
             httpGetChecked(
                 "$host/cgi-bin/srun_portal",
@@ -277,22 +278,26 @@ class SrunClient(
     }
 
     private fun httpGetRaw(fullUrl: String, followRedirects: Boolean): HttpResponse {
-        val conn = connectionFactory(URL(fullUrl))
-        conn.requestMethod = "GET"
-        conn.connectTimeout = connectTimeoutMs
-        conn.readTimeout = readTimeoutMs
-        conn.instanceFollowRedirects = followRedirects
-        conn.useCaches = false
-        conn.setRequestProperty("User-Agent", "Mozilla/5.0")
-        conn.setRequestProperty("X-Requested-With", "XMLHttpRequest")
-        conn.setRequestProperty("Connection", "close")
+        var conn: HttpURLConnection? = null
         try {
-            val code = conn.responseCode
-            val stream = if (code >= 400) conn.errorStream ?: conn.inputStream else conn.inputStream
+            val connection = connectionFactory(URL(fullUrl))
+            conn = connection
+            connection.requestMethod = "GET"
+            connection.connectTimeout = connectTimeoutMs
+            connection.readTimeout = readTimeoutMs
+            connection.instanceFollowRedirects = followRedirects
+            connection.useCaches = false
+            connection.setRequestProperty("User-Agent", "Mozilla/5.0")
+            connection.setRequestProperty("X-Requested-With", "XMLHttpRequest")
+            connection.setRequestProperty("Connection", "close")
+            val code = connection.responseCode
+            val stream = if (code >= 400) null else connection.inputStream
             val body = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
-            return HttpResponse(code, body, conn.headerFields.orEmpty())
+            return HttpResponse(code, body, connection.headerFields.orEmpty())
+        } catch (err: IOException) {
+            throw IOException("网关通信失败（${err.javaClass.simpleName}）", err)
         } finally {
-            conn.disconnect()
+            conn?.disconnect()
         }
     }
 

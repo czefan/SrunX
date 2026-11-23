@@ -129,8 +129,9 @@ class BgServiceClient(private val context: Context) {
         }
     }
 
-    fun loginNow(draft: SrunConfig?) = sendCommand(BgIpcProtocol.MSG_LOGIN_NOW) {
-        draft?.let { putString(BgIpcProtocol.KEY_CONFIG_JSON, IpcCodec.encodeConfig(it)) }
+    fun loginNow(draft: SrunConfig, save: Boolean) = sendCommand(BgIpcProtocol.MSG_LOGIN_NOW) {
+        putString(BgIpcProtocol.KEY_CONFIG_JSON, IpcCodec.encodeConfig(draft))
+        putBoolean(BgIpcProtocol.KEY_SAVE_DRAFT, save)
     }
 
     fun logoutNow() = sendCommand(BgIpcProtocol.MSG_LOGOUT_NOW)

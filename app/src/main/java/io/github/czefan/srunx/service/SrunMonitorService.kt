@@ -185,7 +185,7 @@ class SrunMonitorService : Service() {
             BgIpcProtocol.MSG_LOGIN_NOW -> {
                 val draft = msg.data.getString(BgIpcProtocol.KEY_CONFIG_JSON)?.let(IpcCodec::decodeConfig)
                 val pendingWrite = lastConfigWriteJob
-                val saveDeferred = if (draft != null) CompletableDeferred<Boolean>() else null
+                val saveDeferred = if (draft != null && msg.data.getBoolean(BgIpcProtocol.KEY_SAVE_DRAFT, true)) CompletableDeferred<Boolean>() else null
                 if (draft != null && saveDeferred != null) {
                     lastConfigWriteJob = serviceScope.launch(Dispatchers.IO) {
                         try {
@@ -203,7 +203,7 @@ class SrunMonitorService : Service() {
                     } else {
                         pendingWrite?.join()
                     }
-                    val res = app.coordinator.manualLogin(trigger = "手动")
+                    val res = app.coordinator.manualLogin(trigger = "手动", draft = draft)
                     broadcastEvent(if (res.success) "登录成功" else res.message)
                 }
             }
