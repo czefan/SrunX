@@ -20,9 +20,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
@@ -62,10 +65,12 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.github.czefan.srunx.BuildConfig
 import io.github.czefan.srunx.R
 import io.github.czefan.srunx.protocol.AuthLogEntry
 import io.github.czefan.srunx.protocol.OnlineDevice
@@ -101,6 +106,7 @@ fun SrunXScreen(
     var passwordDraft by rememberSaveable { mutableStateOf("") }
     var domainDraft by rememberSaveable { mutableStateOf("") }
     var draftInitialized by rememberSaveable { mutableStateOf(false) }
+    var showAboutDialog by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(state.configLoaded) {
         if (state.configLoaded && !draftInitialized) {
@@ -128,27 +134,12 @@ fun SrunXScreen(
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable { showAboutDialog = true }
+                            .padding(horizontal = 4.dp, vertical = 4.dp),
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(28.dp)
-                                .clip(CircleShape),
-                        ) {
-                            Image(
-                                painter = painterResource(R.drawable.ic_launcher_background),
-                                contentDescription = null,
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier.fillMaxSize(),
-                            )
-                            Image(
-                                painter = painterResource(R.drawable.ic_launcher_foreground),
-                                contentDescription = null,
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .scale(1.45f),
-                            )
-                        }
+                        SrunXCircleIcon(size = 28.dp)
                         Text(
                             text = "SrunX",
                             fontWeight = FontWeight.SemiBold,
@@ -263,6 +254,110 @@ fun SrunXScreen(
             }
         }
     }
+
+    if (showAboutDialog) {
+        AboutDialog(
+            onOpenRepo = {
+                val repoUri = Uri.parse("https://github.com/czefan/SrunX")
+                runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, repoUri)) }
+            },
+            onDismiss = { showAboutDialog = false },
+        )
+    }
+}
+
+@Composable
+private fun SrunXCircleIcon(size: Dp) {
+    Box(
+        modifier = Modifier
+            .size(size)
+            .clip(CircleShape),
+    ) {
+        Image(
+            painter = painterResource(R.drawable.ic_launcher_background),
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.fillMaxSize(),
+        )
+        Image(
+            painter = painterResource(R.drawable.ic_launcher_foreground),
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .fillMaxSize()
+                .scale(1.45f),
+        )
+    }
+}
+
+@Composable
+private fun AboutDialog(
+    onOpenRepo: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                SrunXCircleIcon(size = 36.dp)
+                Column {
+                    Text(
+                        text = "SrunX",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        text = "v${BuildConfig.VERSION_NAME} · MIT License",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(
+                    text = "极简轻量的开源深澜（Srun3000）校园网自动认证与保活客户端，支持双进程驻留与 Wi-Fi 网卡直连。",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                HorizontalDivider()
+                Text(
+                    text = "隐私与安全",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = "• 密码经 Android Keystore (AES-256-GCM) 加密仅存本地，已关闭系统云备份。\n" +
+                        "• 零定位、零存储、零悬浮窗权限，认证流量仅走 Wi-Fi 网卡直连你配置的网关。\n" +
+                        "• 应用本体无任何第三方联网、遥测或广告。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                HorizontalDivider()
+                Text(
+                    text = "开源仓库：github.com/czefan/SrunX",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onOpenRepo) {
+                Text("打开仓库")
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("关闭")
+            }
+        },
+    )
 }
 
 @Composable
